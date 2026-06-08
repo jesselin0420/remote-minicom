@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <title>Web Serial 極速跨網直連控制站 (智慧快取版)</title>
+    <title>Web Serial 極速跨網直連控制站 (硬體進階版)</title>
     <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
     <style>
         body { font-family: sans-serif; margin: 20px; background: #f5f5f5; color: #333; }
@@ -14,11 +14,11 @@
         button.client-btn { background: #1e3799; }
         button:disabled { background: #ccc; cursor: not-allowed; }
         button:hover:not(:disabled) { opacity: 0.9; }
-        input { padding: 8px; font-size: 14px; width: 60%; border: 1px solid #ccc; border-radius: 4px; }
+        input, select { padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        .input-text { width: 60%; }
+        .setting-grid { display: grid; grid-template-columns: 100px 1fr; gap: 10px; align-items: center; margin-bottom: 10px; font-size: 14px; }
         textarea { width: 100%; height: 300px; font-family: monospace; background: #222; color: #00ff00; padding: 10px; border-radius: 4px; box-sizing: border-box; }
         .status { font-weight: bold; color: #d9534f; margin: 10px 0; }
-        
-        /* 歷史紀錄標籤樣式 */
         .history-zone { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; }
         .history-tag { background: #e0e0e0; color: #333; padding: 4px 8px; border-radius: 4px; font-size: 12px; cursor: pointer; font-family: monospace; }
         .history-tag:hover { background: #008080; color: white; }
@@ -35,16 +35,51 @@
             <h2>1. 雙方自訂名稱對接</h2>
             <p>請在下方輸入雙方約定好的機台代號（全球網路通用）：</p>
             <div style="margin-bottom: 15px;">
-                <input type="text" id="custom-room" placeholder="例如: jesse_bench_01">
+                <input type="text" id="custom-room" class="input-text" placeholder="例如: jesse_bench_01">
             </div>
             <button id="btn-host" class="host-btn" onclick="startAsHost()">我是 Host (接硬體端)</button>
             <button id="btn-client" class="client-btn" onclick="startAsClient()">我是 Client (遠端控制)</button>
         </div>
         
         <div class="box">
-            <h2>2. 本地硬體設定 (Host端才需要)</h2>
-            <button onclick="initSerial()">選擇並開啟本地 COM Port</button>
-            <p>波特率：115200</p>
+            <h2>2. 本地硬體設定 (Host端)</h2>
+            <div class="setting-grid">
+                <label>波特率 (Baud):</label>
+                <div>
+                    <select id="serial-baud" onchange="toggleCustomBaud(this.value)">
+                        <option value="115200">115200</option>
+                        <option value="921600">921600</option>
+                        <option value="1000000">1,000,000</option>
+                        <option value="2000000">2,000,000</option>
+                        <option value="4000000" selected>4,000,000 (高速)</option>
+                        <option value="6000000">6,000,000 (超高速)</option>
+                        <option value="custom">手動輸入...</option>
+                    </select>
+                    <input type="number" id="serial-baud-custom" placeholder="自訂速率" style="display:none; width:110px; margin-left:5px;">
+                </div>
+
+                <label>資料位 (Data):</label>
+                <select id="serial-data">
+                    <option value="8" selected>8 bits</option>
+                    <option value="7">7 bits</option>
+                    <option value="6">6 bits</option>
+                    <option value="5">5 bits</option>
+                </select>
+
+                <label>校驗位 (Parity):</label>
+                <select id="serial-parity">
+                    <option value="none" selected>None (N)</option>
+                    <option value="even">Even (E)</option>
+                    <option value="odd">Odd (O)</option>
+                </select>
+
+                <label>停止位 (Stop):</label>
+                <select id="serial-stop">
+                    <option value="1" selected>1 bit</option>
+                    <option value="2">2 bits</option>
+                </select>
+            </div>
+            <button onclick="initSerial()" style="background: #20bf6b; width: 100%;">選擇並開啟實體 COM Port</button>
         </div>
     </div>
 
@@ -53,7 +88,7 @@
     <div class="box">
         <h2>3. 跨網資料收發控制台</h2>
         <div style="margin-bottom: 10px;">
-            <input type="text" id="cmd-input" placeholder="輸入指令。提示：按 Enter 發送，按鍵盤 ↑ ↓ 可切換歷史紀錄">
+            <input type="text" id="cmd-input" style="width: 70%;" placeholder="輸入指令。提示：按 Enter 發送，按鍵盤 ↑ ↓ 可切換歷史紀錄">
             <button onclick="sendConsoleCmd()">傳送指令</button>
         </div>
         <div style="display: flex; align-items: center; font-size: 13px; color: #666;">
@@ -71,78 +106,100 @@
         let port = null, writer = null, reader = null;
         const prefix = "jesse-uart-direct-";
 
-        // 快取歷史紀錄變數
         let cmdHistory = [];
         let historyIndex = -1;
 
-        // 網頁載入完成後初始化
         window.onload = function() {
-            // 從瀏覽器快取 (localStorage) 讀取之前存過的指令
             const savedHistory = localStorage.getItem('jesse_uart_history');
             if (savedHistory) {
                 cmdHistory = JSON.parse(savedHistory);
                 renderHistoryTags();
             }
 
-            // 監聽鍵盤事件 (Enter發送、上下鍵切換歷史)
             const cmdInput = document.getElementById('cmd-input');
             cmdInput.addEventListener('keydown', function (e) {
                 if (e.key === 'Enter') {
                     sendConsoleCmd();
                 } else if (e.key === 'ArrowUp') {
-                    // 按「上」：撈上一個輸入的指令
-                    e.preventDefault(); // 防止游標亂跳
+                    e.preventDefault();
                     if (cmdHistory.length === 0) return;
                     if (historyIndex === -1) historyIndex = cmdHistory.length;
-                    
                     if (historyIndex > 0) {
                         historyIndex--;
                         cmdInput.value = cmdHistory[historyIndex];
                     }
                 } else if (e.key === 'ArrowDown') {
-                    // 按「下」：回頭撈後面的指令
                     e.preventDefault();
                     if (cmdHistory.length === 0) return;
-                    
                     if (historyIndex !== -1 && historyIndex < cmdHistory.length - 1) {
                         historyIndex++;
                         cmdInput.value = cmdHistory[historyIndex];
                     } else {
                         historyIndex = -1;
-                        cmdInput.value = ""; // 到底了就清空
+                        cmdInput.value = "";
                     }
                 }
             });
             log("[系統] 網頁快取初始化完畢，歷史紀錄已載入。");
         };
 
+        // 控制自訂波特率輸入框的顯示
+        function toggleCustomBaud(val) {
+            const customInput = document.getElementById('serial-baud-custom');
+            if (val === 'custom') {
+                customInput.style.display = 'inline-block';
+                customInput.focus();
+            } else {
+                customInput.style.display = 'none';
+            }
+        }
+
+        // Web Serial 初始化 (Host端專用) - 注入進階 UART 參數
+        async function initSerial() {
+            if (!navigator.serial) return alert("您的瀏覽器不支援 Web Serial API，請使用 Chrome/Edge！");
+            
+            // 抓取畫面上設定的參數
+            const baudSelect = document.getElementById('serial-baud').value;
+            const baudRate = parseInt(baudSelect === 'custom' ? document.getElementById('serial-baud-custom').value : baudSelect);
+            const dataBits = parseInt(document.getElementById('serial-data').value);
+            const parity = document.getElementById('serial-parity').value;
+            const stopBits = parseInt(document.getElementById('serial-stop').value);
+
+            if (!baudRate) return alert("請選擇或輸入正確的波特率！");
+
+            try {
+                log(`[硬體] 正在請求開啟序列埠...`);
+                port = await navigator.serial.requestPort();
+                
+                // 核心：將設定值塞進 Open Options
+                await port.open({ 
+                    baudRate: baudRate,
+                    dataBits: dataBits,
+                    parity: parity,
+                    stopBits: stopBits
+                }); 
+                
+                writer = port.writable.getWriter();
+                log(`[硬體] 實體 COM Port 開啟成功！配置為: ${baudRate}, ${parity.toUpperCase().charAt(0)}, ${dataBits}, ${stopBits}`);
+                readSerialLoop();
+            } catch (e) { 
+                log("[硬體錯誤] 無法開啟序列埠，錯誤訊息: " + e); 
+            }
+        }
+
         // 儲存指令到快取
         function saveCmdToCache(cmd) {
-            // 如果已經存在一模一樣的指令，先刪除舊的（確保它會被移到最新順序）
             cmdHistory = cmdHistory.filter(item => item !== cmd);
-            
-            // 把新指令塞進陣列最後面
             cmdHistory.push(cmd);
-            
-            // 最多只保留 15 筆，免得畫面太亂
-            if (cmdHistory.length > 15) {
-                cmdHistory.shift();
-            }
-            
-            // 寫入瀏覽器實體快取
+            if (cmdHistory.length > 15) cmdHistory.shift();
             localStorage.setItem('jesse_uart_history', JSON.stringify(cmdHistory));
-            
-            // 重設鍵盤指針並重新渲染標籤
             historyIndex = -1;
             renderHistoryTags();
         }
 
-        // 把快取指令渲染成可點擊的標籤
         function renderHistoryTags() {
             const container = document.getElementById('history-list');
             container.innerHTML = "";
-            
-            // 由新到舊反向排序顯示
             for (let i = cmdHistory.length - 1; i >= 0; i--) {
                 const tag = document.createElement('span');
                 tag.className = 'history-tag';
@@ -156,7 +213,6 @@
             }
         }
 
-        // 清除快取
         function clearHistory() {
             if(confirm("確定要清空所有儲存的指令歷史紀錄嗎？")) {
                 cmdHistory = [];
@@ -167,15 +223,12 @@
             }
         }
 
-        // 修改後的發送指令 function
         async function sendConsoleCmd() {
             const cmdInput = document.getElementById('cmd-input');
             const cmd = cmdInput.value.trim();
             if(!cmd) return;
             
             log("[本地發送] " + cmd);
-            
-            // 【新增】將指令紀錄至快取
             saveCmdToCache(cmd);
 
             if (conn && conn.open) conn.send(cmd);
@@ -186,7 +239,6 @@
             cmdInput.value = "";
         }
 
-        // 以下為原本核心通訊代碼，一字未改，保持功能完好
         function startAsHost() {
             const roomName = document.getElementById('custom-room').value.trim();
             if (!roomName) return alert("請輸入約定名稱！");
@@ -243,17 +295,6 @@
                 updateStatus("連線已中斷", "#d9534f");
                 unlockButtons();
             });
-        }
-
-        async function initSerial() {
-            if (!navigator.serial) return alert("您的瀏覽器不支援 Web Serial API！");
-            try {
-                port = await navigator.serial.requestPort();
-                await port.open({ baudRate: 115200 }); 
-                writer = port.writable.getWriter();
-                log("[硬體] 實體 COM Port 開啟成功 (115200)！");
-                readSerialLoop();
-            } catch (e) { log("[硬體錯誤] " + e); }
         }
 
         async function readSerialLoop() {

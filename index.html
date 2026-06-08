@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>Web Serial 極速跨網直連控制站 (智慧快取版)</title>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background: #f5f5f5; color: #333; }
+        .container { display: flex; gap: 20px; }
+        .box { flex: 1; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h2 { margin-top: 0; color: #008080; }
+        button { background: #008080; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-size: 14px; margin: 5px 0; }
+        button.host-btn { background: #4a69bd; }
+        button.client-btn { background: #1e3799; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        button:hover:not(:disabled) { opacity: 0.9; }
+        input { padding: 8px; font-size: 14px; width: 60%; border: 1px solid #ccc; border-radius: 4px; }
+        textarea { width: 100%; height: 300px; font-family: monospace; background: #222; color: #00ff00; padding: 10px; border-radius: 4px; box-sizing: border-box; }
+        .status { font-weight: bold; color: #d9534f; margin: 10px 0; }
+        
+        /* 歷史紀錄標籤樣式 */
+        .history-zone { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; }
+        .history-tag { background: #e0e0e0; color: #333; padding: 4px 8px; border-radius: 4px; font-size: 12px; cursor: pointer; font-family: monospace; }
+        .history-tag:hover { background: #008080; color: white; }
+        .clear-history { background: #d9534f; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-left: auto;}
+    </style>
+</head>
+<body>
+
+    <h1>Web Serial 極速跨網直連控制站</h1>
+    <div class="status" id="net-status">尚未連線</div>
+
+    <div class="container">
+        <div class="box">
+            <h2>1. 雙方自訂名稱對接</h2>
+            <p>請在下方輸入雙方約定好的機台代號（全球網路通用）：</p>
+            <div style="margin-bottom: 15px;">
+                <input type="text" id="custom-room" placeholder="例如: jesse_bench_01">
+            </div>
+            <button id="btn-host" class="host-btn" onclick="startAsHost()">我是 Host (接硬體端)</button>
+            <button id="btn-client" class="client-btn" onclick="startAsClient()">我是 Client (遠端控制)</button>
+        </div>
+        
+        <div class="box">
+            <h2>2. 本地硬體設定 (Host端才需要)</h2>
+            <button onclick="initSerial()">選擇並開啟本地 COM Port</button>
+            <p>波特率：115200</p>
+        </div>
+    </div>
+
+    <br>
+
+    <div class="box">
+        <h2>3. 跨網資料收發控制台</h2>
+        <div style="margin-bottom: 10px;">
+            <input type="text" id="cmd-input" placeholder="輸入指令。提示：按 Enter 發送，按鍵盤 ↑ ↓ 可切換歷史紀錄">
+            <button onclick="sendConsoleCmd()">傳送指令</button>
+        </div>
+        <div style="display: flex; align-items: center; font-size: 13px; color: #666;">
+            <span>常用歷史快取 (點擊直接填入)：</span>
+            <span class="clear-history" onclick="clearHistory()">清除快取</span>
+        </div>
+        <div class="history-zone" id="history-list"></div>
+        
+        <br>
+        <textarea id="log" readonly placeholder="通訊日誌..."></textarea>
+    </div>
+
+    <script>
+        let peer = null, conn = null;
+        let port = null, writer = null, reader = null;
+        const prefix = "jesse-uart-direct-";
+
+        // 快取歷史紀錄變數
+        let cmdHistory = [];
+        let historyIndex = -1;
+
+        // 網頁載入完成後初始化
+        window.onload = function() {
+            // 從瀏覽器快取 (localStorage) 讀取之前存過的指令
+            const savedHistory = localStorage.getItem('jesse_uart_history');
+            if (savedHistory) {
+                cmdHistory = JSON.parse(savedHistory);
+                renderHistoryTags();
+            }
+
+            // 監聽鍵盤事件 (Enter發送、上下鍵切換歷史)
+            const cmdInput = document.getElementById('cmd-input');
+            cmdInput.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') {
+                    sendConsoleCmd();
+                } else if (e.key === 'ArrowUp') {
+                    // 按「上」：撈上一個輸入的指令
+                    e.preventDefault(); // 防止游標亂跳
+                    if (cmdHistory.length === 0) return;
+                    if (historyIndex === -1) historyIndex = cmdHistory.length;
+                    
+                    if (historyIndex > 0) {
+                        historyIndex--;
+                        cmdInput.value = cmdHistory[historyIndex];
+                    }
+                } else if (e.key === 'ArrowDown') {
+                    // 按「下」：回頭撈後面的指令
+                    e.preventDefault();
+                    if (cmdHistory.length === 0) return;
+                    
+                    if (historyIndex !== -1 && historyIndex < cmdHistory.length - 1) {
+                        historyIndex++;
+                        cmdInput.value = cmdHistory[historyIndex];
+                    } else {
+                        historyIndex = -1;
+                        cmdInput.value = ""; // 到底了就清空
+                    }
+                }
+            });
+            log("[系統] 網頁快取初始化完畢，歷史紀錄已載入。");
+        };
+
+        // 儲存指令到快取
+        function saveCmdToCache(cmd) {
+            // 如果已經存在一模一樣的指令，先刪除舊的（確保它會被移到最新順序）
+            cmdHistory = cmdHistory.filter(item => item !== cmd);
+            
+            // 把新指令塞進陣列最後面
+            cmdHistory.push(cmd);
+            
+            // 最多只保留 15 筆，免得畫面太亂
+            if (cmdHistory.length > 15) {
+                cmdHistory.shift();
+            }
+            
+            // 寫入瀏覽器實體快取
+            localStorage.setItem('jesse_uart_history', JSON.stringify(cmdHistory));
+            
+            // 重設鍵盤指針並重新渲染標籤
+            historyIndex = -1;
+            renderHistoryTags();
+        }
+
+        // 把快取指令渲染成可點擊的標籤
+        function renderHistoryTags() {
+            const container = document.getElementById('history-list');
+            container.innerHTML = "";
+            
+            // 由新到舊反向排序顯示
+            for (let i = cmdHistory.length - 1; i >= 0; i--) {
+                const tag = document.createElement('span');
+                tag.className = 'history-tag';
+                tag.innerText = cmdHistory[i];
+                tag.onclick = function() {
+                    document.getElementById('cmd-input').value = cmdHistory[i];
+                    historyIndex = i;
+                    document.getElementById('cmd-input').focus();
+                };
+                container.appendChild(tag);
+            }
+        }
+
+        // 清除快取
+        function clearHistory() {
+            if(confirm("確定要清空所有儲存的指令歷史紀錄嗎？")) {
+                cmdHistory = [];
+                historyIndex = -1;
+                localStorage.removeItem('jesse_uart_history');
+                renderHistoryTags();
+                log("[系統] 本地指令快取已清空。");
+            }
+        }
+
+        // 修改後的發送指令 function
+        async function sendConsoleCmd() {
+            const cmdInput = document.getElementById('cmd-input');
+            const cmd = cmdInput.value.trim();
+            if(!cmd) return;
+            
+            log("[本地發送] " + cmd);
+            
+            // 【新增】將指令紀錄至快取
+            saveCmdToCache(cmd);
+
+            if (conn && conn.open) conn.send(cmd);
+            else if (writer) {
+                const encoder = new TextEncoder();
+                await writer.write(encoder.encode(cmd + "\r\n"));
+            }
+            cmdInput.value = "";
+        }
+
+        // 以下為原本核心通訊代碼，一字未改，保持功能完好
+        function startAsHost() {
+            const roomName = document.getElementById('custom-room').value.trim();
+            if (!roomName) return alert("請輸入約定名稱！");
+            updateStatus(`正在向雲端註冊名稱 [${roomName}]...`, "#f0ad4e");
+            lockButtons();
+            if(peer) peer.destroy();
+            peer = new Peer(prefix + roomName);
+            peer.on('open', id => {
+                updateStatus(`Host 已就緒！等待 Client 輸入 [${roomName}] 連入...`, "#5cb85c");
+                log(`[系統] 成功佔用雲端頻道。`);
+            });
+            peer.on('connection', c => {
+                conn = c;
+                updateStatus(`連線成功！已與遠端 Client 建立跨網 P2P 通道。`, "#5cb85c");
+                log("[系統] 遠端控制端已連入。");
+                setupWebRTCListener();
+            });
+            peer.on('error', err => {
+                unlockButtons();
+                if (err.type === 'unavailable-id') alert("名稱在雲端上已被佔用！");
+                else log("[錯誤] " + err.type);
+            });
+        }
+
+        function startAsClient() {
+            const roomName = document.getElementById('custom-room').value.trim();
+            if (!roomName) return alert("請輸入約定名稱！");
+            updateStatus(`正在跨網尋找 Host [${roomName}]...`, "#f0ad4e");
+            lockButtons();
+            if(peer) peer.destroy();
+            peer = new Peer(); 
+            peer.on('open', () => {
+                log(`[系統] 正在發起 P2P 跨網穿透...`);
+                conn = peer.connect(prefix + roomName);
+                conn.on('open', () => {
+                    updateStatus(`連線成功！已直連遠端 Host [${roomName}]`, "#5cb85c");
+                    log("[系統] 跨網隧道建立完畢！");
+                });
+                setupWebRTCListener();
+            });
+        }
+
+        function setupWebRTCListener() {
+            conn.on('data', async (data) => {
+                log("[收到遠端資料] " + data);
+                if (writer) {
+                    try {
+                        const encoder = new TextEncoder();
+                        await writer.write(encoder.encode(data + "\r\n"));
+                    } catch(e) { log("[硬體錯誤] 寫入失敗: " + e); }
+                }
+            });
+            conn.on('close', () => {
+                updateStatus("連線已中斷", "#d9534f");
+                unlockButtons();
+            });
+        }
+
+        async function initSerial() {
+            if (!navigator.serial) return alert("您的瀏覽器不支援 Web Serial API！");
+            try {
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 }); 
+                writer = port.writable.getWriter();
+                log("[硬體] 實體 COM Port 開啟成功 (115200)！");
+                readSerialLoop();
+            } catch (e) { log("[硬體錯誤] " + e); }
+        }
+
+        async function readSerialLoop() {
+            const decoder = new TextDecoder();
+            while (port.readable) {
+                reader = port.readable.getReader();
+                try {
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        if (value) {
+                            const rawText = decoder.decode(value);
+                            log("[實體 Rx] " + rawText.trim());
+                            if (conn && conn.open) conn.send(rawText);
+                        }
+                    }
+                } catch (error) { log("[硬體錯誤] " + error); } finally { reader.releaseLock(); }
+            }
+        }
+
+        function updateStatus(text, color) {
+            document.getElementById('net-status').innerText = text;
+            document.getElementById('net-status').style.color = color;
+        }
+
+        function lockButtons() {
+            document.getElementById('btn-host').disabled = true;
+            document.getElementById('btn-client').disabled = true;
+        }
+
+        function unlockButtons() {
+            document.getElementById('btn-host').disabled = false;
+            document.getElementById('btn-client').disabled = false;
+        }
+
+        function log(msg) {
+            const consoleLog = document.getElementById('log');
+            consoleLog.value += msg + "\n";
+            consoleLog.scrollTop = consoleLog.scrollHeight;
+        }
+    </script>
+</body>
+</html>

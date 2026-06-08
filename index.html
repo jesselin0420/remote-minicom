@@ -29,7 +29,7 @@
         #bmp { display: none; }
         #preview { width: 96px; height: 72px; border: 1px solid #c9c9c9; object-fit: contain; background: #eee; }
         .grid-buttons { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 8px; }
-        .color-swatch { display: inline-block; width: 16px; height: 16px; border: 1px solid #999; margin-left: 6px; vertical-align: middle; border-radius: 2px; }
+        .color-swatch { inline-block; width: 16px; height: 16px; border: 1px solid #999; margin-left: 6px; vertical-align: middle; border-radius: 2px; }
         
         /* 歷史紀錄標籤 */
         .history-zone { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; }
@@ -479,7 +479,7 @@
 
         async function runHostXmodemWorkflow(rawData) {
             isXmodemSessionActive = true;
-            rxQueue = []; 
+            rxQueue = []; // 先清空一次
             
             try {
                 log("INFO", "開始執行序列面板強制喚醒初始化巨集...");
@@ -490,7 +490,10 @@
                 await sendHardwareCmdDirect('dsi bl_on 100');
                 await sleep(100);
                 await sendHardwareCmdDirect('lcd load');
+                
+                // 【核心修正】等 500ms 讓指令完完全全送完，並把殘留在佇列中的指令回應文字徹底倒掉清空！
                 await sleep(500);
+                rxQueue = []; 
 
                 log("INFO", "等待螢幕控制板發起 XMODEM 握手信號 (NAK / C)...");
                 const startSignal = await waitForByte(5000);

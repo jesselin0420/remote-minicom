@@ -11,17 +11,19 @@
         h2, h3 { margin-top: 0; color: #008080; }
         button, select, input[type=text], input[type=number] { padding: 8px 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
         button { background: #008080; color: white; border: none; cursor: pointer; margin: 5px 0; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
+        button:disabled { background: #ccc; cursor: not-allowed; opacity: 0.6; }
         button:hover:not(:disabled) { opacity: 0.9; }
         button.host-btn { background: #4a69bd; }
         button.client-btn { background: #1e3799; }
         .input-text { width: 60%; }
         .setting-grid { display: grid; grid-template-columns: 110px 1fr; gap: 10px; align-items: center; margin-bottom: 10px; font-size: 14px; }
         textarea { width: 100%; height: 260px; font-family: Consolas, monospace; background: #222; color: #00ff00; padding: 10px; border-radius: 4px; box-sizing: border-box; }
-        .status { font-weight: bold; color: #d9534f; margin: 10px 0; }
+        .status-container { display: flex; align-items: center; gap: 15px; margin: 10px 0; }
+        .status { font-weight: bold; color: #d9534f; }
         .ok { color: #0a7a0a; }
         .err { color: #b00020; }
         .muted { color: #666; font-size: 12px; margin-top: 4px; }
+        .unlock-link { color: #4a69bd; font-size: 12px; cursor: pointer; text-decoration: underline; }
         
         /* BMP 預覽與樣式 */
         #bmp { display: none; }
@@ -39,7 +41,10 @@
 <body>
 
     <h1>Web Serial 全功能跨網直連與螢幕驗證控制站</h1>
-    <div class="status" id="net-status">尚未連線</div>
+    <div class="status-container">
+        <div class="status" id="net-status">尚未連線</div>
+        <span class="unlock-link" onclick="unlockButtons(); log('INFO', '手動解除按鈕鎖定。');">⚠️ [強制解鎖按鈕]</span>
+    </div>
 
     <div class="container">
         <div class="box">
@@ -156,13 +161,12 @@
     </div>
 
     <script>
-        // XMODEM 協定協議常數
         const SOH = 0x01;
         const STX = 0x02;
         const EOT = 0x04;
         const ACK = 0x06;
         const NAK = 0x15;
-        const CRC_MODE = 0x43; // 'C'
+        const CRC_MODE = 0x43; 
 
         let peer = null, conn = null;
         let port = null, writer = null, reader = null;
@@ -221,11 +225,502 @@
         function startAsHost() {
             const roomName = document.getElementById('custom-room').value.trim();
             if (!roomName) return alert("請輸入約定名稱！");
-            updateStatus(`正在向雲端註冊名稱 [${roomName}]...`, "#f0ad4e");
-            lockButtons();
-            if(peer) peer.destroy();
-            peer = new Peer(prefix + roomName);
+            
+            try {
+                updateStatus(`正在向雲端註冊名稱 [${roomName}]...`, "#f0ad4e");
+                lockButtons();
+                if(peer) { try { peer.destroy(); } catch(_){} }
+                
+                peer = new Peer(prefix + roomName);
 
-            peer.on('open', id => {
-                updateStatus(`Host 已就緒！等待 Client 輸入 [${roomName}] 連入...`, "#5cb85c");
-                log("INFO",
+                peer.on('open', id => {
+                    updateStatus(`Host 已就緒！等待 Client 輸入 [${roomName}] 連入...`, "#5cb85c");
+                    log("INFO", `成功建立雲端頻道。`);
+                });
+
+                peer.on('connection', c => {
+                    conn = c;
+                    updateStatus(`連線成功！已與遠端 Client 建立跨網 P2P 通道。`, "#5cb85c");
+                    log("INFO", "遠端 Client 控制端已安全連入。");
+                    setupWebRTCListener();
+                });
+
+                peer.on('error', err => {
+                    unlockButtons();
+                    if (err.type === 'unavailable-id') {
+                        alert("名稱在雲端上已被佔用，請更換名字！");
+                        updateStatus("頻道名稱被佔用", "#d9534f");
+                    } else {
+                        log("ERROR", "PeerJS 錯誤: " + err.type);
+                        updateStatus("連線錯誤: " + err.type, "#d9534f");
+                    }
+                });
+            } catch (e) {
+                log("ERROR", "啟動 Host 異常: " + e);
+                unlockButtons();
+            }
+        }
+
+        function startAsClient() {
+            const roomName = document.getElementById('custom-room').value.trim();
+            if (!roomName) return alert("請輸入約定名稱！");
+            
+            try {
+                updateStatus(`正在跨網尋找 Host [${roomName}]...`, "#f0ad4e");
+                lockButtons();
+                if(peer) { try { peer.destroy(); } catch(_){} }
+                
+                peer = new Peer(); 
+
+                peer.on('open', () => {
+                    log("INFO", `正在發起 P2P 跨網安全穿透隧道...`);
+                    conn = peer.connect(prefix + roomName);
+                    
+                    conn.on('open', () => {
+                        updateStatus(`連線成功！已直連遠端 Host [${roomName}]`, "#5cb85c");
+                        log("INFO", "跨網 P2P 數據流隧道建立完畢！");
+                    });
+                    setupWebRTCListener();
+                });
+
+                peer.on('error', err => {
+                    unlockButtons();
+                    log("ERROR", "Client Peer 發生錯誤: " + err.type);
+                    updateStatus("尋找 Host 失敗: " + err.type, "#d9534f");
+                });
+            } catch (e) {
+                log("ERROR", "啟動 Client 異常: " + e);
+                unlockButtons();
+            }
+        }
+
+        function setupWebRTCListener() {
+            if(!conn) return;
+            
+            conn.on('data', async (data) => {
+                if (typeof data === 'object' && data.type === 'RAW_IMAGE_DATA') {
+                    log("RECV", `收到遠端跨網傳來的圖檔 RAW 數據 (${data.payload.length} 位元組)`);
+                    try {
+                        setBusy(true);
+                        await runHostXmodemWorkflow(new Uint8Array(data.payload));
+                    } catch (e) {
+                        log("ERROR", `執行遠端圖檔燒錄失敗: ${e}`);
+                    } finally {
+                        setBusy(false);
+                    }
+                } else if (typeof data === 'object' && data.type === 'UI_PROGRESS') {
+                    setUploadProgress(data.pct);
+                    if(data.msg) log("UPLOAD", data.msg);
+                } else {
+                    log("RECV_REMOTE", data);
+                    if (writer && !isXmodemSessionActive) {
+                        try {
+                            await writer.write(enc.encode(data + "\r\n"));
+                        } catch(e) { log("ERROR", "寫入 COM Port 失敗: " + e); }
+                    }
+                }
+            });
+
+            conn.on('close', () => {
+                updateStatus("連線已中斷", "#d9534f");
+                unlockButtons();
+            });
+            
+            conn.on('error', (err) => {
+                log("ERROR", "通道通訊異常: " + err);
+                unlockButtons();
+            });
+        }
+
+        // ==========================================
+        // 實體硬體控制核心 (Web Serial)
+        // ==========================================
+        async function initSerial() {
+            if (!navigator.serial) return alert("您的瀏覽器不支援 Web Serial API！");
+            
+            const baudSelect = document.getElementById('serial-baud').value;
+            const baudRate = parseInt(baudSelect === 'custom' ? document.getElementById('serial-baud-custom').value : baudSelect);
+            const dataBits = parseInt(document.getElementById('serial-data').value);
+            const parity = document.getElementById('serial-parity').value;
+            const stopBits = parseInt(document.getElementById('serial-stop').value);
+
+            if (!baudRate) return alert("請選擇或輸入正確的波特率！");
+
+            try {
+                log("INFO", `正在請求開啟硬體序列埠...`);
+                port = await navigator.serial.requestPort();
+                
+                await port.open({ 
+                    baudRate: baudRate,
+                    dataBits: dataBits,
+                    parity: parity,
+                    stopBits: stopBits
+                }); 
+                
+                writer = port.writable.getWriter();
+                document.getElementById('btnConnectSerial').style.background = '#0a7a0a';
+                log("INFO", `實體 COM Port 開啟成功！配置: ${baudRate}, ${parity.toUpperCase().charAt(0)}, ${dataBits}, ${stopBits}`);
+                readSerialLoop();
+            } catch (e) { 
+                log("ERROR", "無法開啟序列埠，原因: " + e); 
+            }
+        }
+
+        async function readSerialLoop() {
+            while (port && port.readable) {
+                try {
+                    reader = port.readable.getReader();
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        if (value && value.length) {
+                            if (isXmodemSessionActive) {
+                                for (const b of value) rxQueue.push(b);
+                            } else {
+                                const rawText = dec.decode(value);
+                                log("UART_Rx", rawText.trim());
+                                if (conn && conn.open) conn.send(rawText.trim());
+                            }
+                        }
+                    }
+                } catch (error) { 
+                    if(!isXmodemSessionActive) log("ERROR", "讀取序列埠中斷: " + error); 
+                    break;
+                } finally { 
+                    if(reader) { try { reader.releaseLock(); } catch(_){} }
+                }
+            }
+        }
+
+        // ==========================================
+        // BMP 圖檔處理解析與 XMODEM 傳輸引擎
+        // ==========================================
+        function handleBmpSelect() {
+            const f = document.getElementById('bmp').files?.[0];
+            if (!f) {
+                document.getElementById('preview').removeAttribute('src');
+                document.getElementById('previewInfo').textContent = 'No file selected';
+                return;
+            }
+            document.getElementById('preview').src = URL.createObjectURL(f);
+            document.getElementById('previewInfo').textContent = `${f.name} (${f.size} bytes)`;
+        }
+
+        function createCanvas(w, h) {
+            const c = document.createElement('canvas');
+            c.width = w; c.height = h;
+            return c;
+        }
+
+        async function bmpToRawBgr24(file) {
+            const imgBmp = await createImageBitmap(file);
+            const ow = imgBmp.width;
+            const oh = imgBmp.height;
+
+            const scale = Math.max(480 / ow, 480 / oh);
+            const nw = Math.max(1, Math.round(ow * scale));
+            const nh = Math.max(1, Math.round(oh * scale));
+
+            const scaleCv = createCanvas(nw, nh);
+            const sctx = scaleCv.getContext('2d');
+            sctx.drawImage(imgBmp, 0, 0, nw, nh);
+
+            const cropX = Math.floor((nw - 480) / 2);
+            const cropY = Math.floor((nh - 480) / 2);
+            const cropCv = createCanvas(480, 480);
+            const cctx = cropCv.getContext('2d');
+            cctx.drawImage(scaleCv, cropX, cropY, 480, 480, 0, 0, 480, 480);
+
+            const padCv = createCanvas(1024, 480);
+            const pctx = padCv.getContext('2d');
+            pctx.fillStyle = 'black';
+            pctx.fillRect(0, 0, 1024, 480);
+            pctx.drawImage(cropCv, 0, 0);
+
+            const rgba = pctx.getImageData(0, 0, 1024, 480).data;
+            const raw = new Uint8Array(1024 * 480 * 3);
+            let j = 0;
+            for (let i = 0; i < rgba.length; i += 4) {
+                raw[j++] = rgba[i + 2]; 
+                raw[j++] = rgba[i + 1]; 
+                raw[j++] = rgba[i + 0]; 
+            }
+            return raw;
+        }
+
+        async function startBmpUploadWorkflow() {
+            const file = document.getElementById('bmp').files?.[0];
+            if (!file) return alert("請先選擇一個 BMP 檔案！");
+
+            try {
+                setBusy(true);
+                setUploadProgress(0);
+                log("INFO", "本地解析 BMP 並轉換為 RAW BGR24 格式...");
+                const rawData = await bmpToRawBgr24(file);
+                log("INFO", `轉檔完成，生成數據流規格: ${rawData.length} bytes.`);
+
+                if (peer && conn && conn.open && !writer) {
+                    log("INFO", "正透過 WebRTC 隧道將 RAW 數據跨網段傳送至 Host 端機台...");
+                    conn.send({
+                        type: 'RAW_IMAGE_DATA',
+                        payload: Array.from(rawData)
+                    });
+                } else {
+                    if (!port || !writer) throw new Error("實體序列埠尚未開啟，無法燒錄硬體！");
+                    await runHostXmodemWorkflow(rawData);
+                }
+            } catch (e) {
+                log("ERROR", "上傳作業失敗: " + e);
+                alert("上傳失敗: " + e);
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        async function runHostXmodemWorkflow(rawData) {
+            isXmodemSessionActive = true;
+            rxQueue = []; 
+            
+            try {
+                log("INFO", "開始執行序列面板強制喚醒初始化巨集...");
+                await sendHardwareCmdDirect('dsi init');
+                await sleep(100);
+                await sendHardwareCmdDirect('dsi start');
+                await sleep(100);
+                await sendHardwareCmdDirect('dsi bl_on 100');
+                await sleep(100);
+                await sendHardwareCmdDirect('lcd load');
+                await sleep(500);
+
+                log("INFO", "等待螢幕控制板發起 XMODEM 握手信號 (NAK / C)...");
+                const startSignal = await waitForByte(5000);
+                if (startSignal !== NAK && startSignal !== CRC_MODE) {
+                    throw new Error(`未收到合法的 XMODEM 啟動信號，取得字元: ${startSignal}`);
+                }
+
+                const useCrc = (startSignal === CRC_MODE);
+                log("INFO", `握手成功。通訊協定採用: ${useCrc ? 'XMODEM-CRC (1K)' : 'XMODEM-Checksum (128B)'}`);
+
+                if (useCrc) {
+                    try {
+                        await doXmodemTransfer(rawData, true, 1024);
+                    } catch (e1) {
+                        log("WARN", `1K 高速傳輸失敗，自動降級至 128 位元組模式重試: ${e1}`);
+                        await sleep(200);
+                        rxQueue = [];
+                        await doXmodemTransfer(rawData, true, 128);
+                    }
+                } else {
+                    await doXmodemTransfer(rawData, false, 128);
+                }
+
+                await writer.write(new Uint8Array([EOT]));
+                const eotResp = await waitForByte(1000);
+                if (eotResp !== ACK) log("WARN", `結束傳送時未收到 ACK 信號，回應為: ${eotResp}`);
+
+                reportProgress(100, "XMODEM 全數轉移並燒錄成功！");
+                alert("面板圖片更新上傳成功！");
+            } catch (e) {
+                log("ERROR", "硬體傳輸終止: " + e);
+                throw e;
+            } finally {
+                isXmodemSessionActive = false;
+            }
+        }
+
+        async function doXmodemTransfer(rawData, useCrc, blockSize) {
+            const totalBlocks = Math.ceil(rawData.length / blockSize);
+            
+            for (let block = 1; block <= totalBlocks; block++) {
+                const s = (block - 1) * blockSize;
+                const e = Math.min(s + blockSize, rawData.length);
+                
+                const chunk = new Uint8Array(blockSize);
+                chunk.set(rawData.slice(s, e));
+
+                let trailer;
+                if (useCrc) {
+                    const c = crc16(chunk);
+                    trailer = new Uint8Array([(c >> 8) & 0xFF, c & 0xFF]);
+                } else {
+                    let sum = 0;
+                    for (let i = 0; i < chunk.length; i++) sum = (sum + chunk[i]) & 0xFF;
+                    trailer = new Uint8Array([sum]);
+                }
+
+                const pkt = new Uint8Array(3 + chunk.length + trailer.length);
+                pkt[0] = (blockSize === 1024) ? STX : SOH;
+                pkt[1] = block & 0xFF;
+                pkt[2] = (~block) & 0xFF;
+                pkt.set(chunk, 3);
+                pkt.set(trailer, 3 + chunk.length);
+
+                let success = false;
+                for (let retry = 0; retry < 3; retry++) {
+                    await writer.write(pkt);
+                    const r = await waitForByte(800);
+                    if (r === ACK) {
+                        success = true;
+                        break;
+                    }
+                    if (r === NAK) continue;
+                    throw new Error(`區塊 ${block} 接收端拒絕 (錯誤碼: ${r})`);
+                }
+
+                if (!success) throw new Error(`區塊 ${block} 超過重試次數，傳輸失敗。`);
+
+                if (block % 50 === 0 || block === totalBlocks) {
+                    const pct = Math.floor((block / totalBlocks) * 100);
+                    reportProgress(pct, `傳輸進度: Block ${block}/${totalBlocks} (${pct}%)`);
+                }
+            }
+        }
+
+        function crc16(data) {
+            let crc = 0;
+            for (let i = 0; i < data.length; i++) {
+                crc ^= (data[i] << 8);
+                for (let j = 0; j < 8; j++) {
+                    crc <<= 1;
+                    if (crc & 0x10000) crc ^= 0x1021;
+                    crc &= 0xFFFF;
+                }
+            }
+            return crc;
+        }
+
+        async function waitForByte(timeoutMs = 800) {
+            const start = performance.now();
+            while (performance.now() - start < timeoutMs) {
+                if (rxQueue.length > 0) return rxQueue.shift();
+                await sleep(10);
+            }
+            return null;
+        }
+
+        async function sendHardwareCmdDirect(command) {
+            if (!writer) return;
+            log("SEND_HW", command);
+            await writer.write(enc.encode(command + '\n'));
+        }
+
+        function reportProgress(pct, msg) {
+            setUploadProgress(pct);
+            if(msg) log("UPLOAD", msg);
+            if (conn && conn.open && writer) {
+                conn.send({ type: 'UI_PROGRESS', pct: pct, msg: msg });
+            }
+        }
+
+        // ==========================================
+        // 介面互動與基礎小工具
+        // ==========================================
+        function sendQuickCmd(cmd) {
+            document.getElementById('cmd-input').value = cmd;
+            sendConsoleCmd();
+        }
+
+        let brightDebounce = null;
+        function handleBrightnessInput(val) {
+            document.getElementById('brightnessValue').textContent = `${val}%`;
+            if (brightDebounce) clearTimeout(brightDebounce);
+            brightDebounce = setTimeout(() => {
+                document.getElementById('cmd-input').value = `dsi bl_on ${val}`;
+                sendConsoleCmd();
+            }, 150);
+        }
+
+        async function sendConsoleCmd() {
+            const cmdInput = document.getElementById('cmd-input');
+            const cmd = cmdInput.value.trim();
+            if(!cmd) return;
+            
+            log("本地發送", cmd);
+            saveCmdToCache(cmd);
+
+            if (conn && conn.open) {
+                conn.send(cmd);
+            } else if (writer) {
+                await writer.write(enc.encode(cmd + "\r\n"));
+            }
+            cmdInput.value = "";
+        }
+
+        function saveCmdToCache(cmd) {
+            cmdHistory = cmdHistory.filter(item => item !== cmd);
+            cmdHistory.push(cmd);
+            if (cmdHistory.length > 15) cmdHistory.shift();
+            localStorage.setItem('jesse_uart_history', JSON.stringify(cmdHistory));
+            historyIndex = -1;
+            renderHistoryTags();
+        }
+
+        function renderHistoryTags() {
+            const container = document.getElementById('history-list');
+            container.innerHTML = "";
+            for (let i = cmdHistory.length - 1; i >= 0; i--) {
+                const tag = document.createElement('span');
+                tag.className = 'history-tag';
+                tag.innerText = cmdHistory[i];
+                tag.onclick = function() {
+                    document.getElementById('cmd-input').value = cmdHistory[i];
+                    historyIndex = i;
+                    document.getElementById('cmd-input').focus();
+                };
+                container.appendChild(tag);
+            }
+        }
+
+        function clearHistory() {
+            if(confirm("確定要清空所有儲存的指令歷史紀錄嗎？")) {
+                cmdHistory = [];
+                historyIndex = -1;
+                localStorage.removeItem('jesse_uart_history');
+                renderHistoryTags();
+                log("INFO", "本地指令快取已清空。");
+            }
+        }
+
+        function setUploadProgress(pct) {
+            const v = Math.max(0, Math.min(100, Math.floor(pct)));
+            document.getElementById('uploadProgress').value = v;
+            document.getElementById('uploadProgressText').textContent = `${v}%`;
+        }
+
+        function updateStatus(text, color) {
+            const statusDiv = document.getElementById('net-status');
+            statusDiv.innerText = text;
+            statusDiv.style.color = color;
+        }
+
+        function lockButtons() {
+            document.getElementById('btn-host').disabled = true;
+            document.getElementById('btn-client').disabled = true;
+        }
+
+        function unlockButtons() {
+            document.getElementById('btn-host').disabled = false;
+            document.getElementById('btn-client').disabled = false;
+        }
+
+        function setBusy(isBusy) {
+            const ctrls = [
+                document.getElementById('serial-baud'), document.getElementById('bmp'),
+                document.getElementById('btnUpload'), document.getElementById('brightness'),
+                document.getElementById('cmd-input')
+            ];
+            ctrls.forEach(c => c.disabled = !!isBusy);
+        }
+
+        function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+        function log(level, msg) {
+            const consoleLog = document.getElementById('log');
+            const d = new Date();
+            const timeStr = d.toTimeString().slice(0, 8);
+            consoleLog.value += `[${timeStr}] ${level}: ${msg}\n`;
+            consoleLog.scrollTop = consoleLog.scrollHeight;
+        }
+    </script>
+</body>
+</html>

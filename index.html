@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <title>Web Serial 極速跨網直連控制站 (硬體進階版)</title>
+    <title>Web Serial 極速跨網直連控制站 (全速域版)</title>
     <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
     <style>
         body { font-family: sans-serif; margin: 20px; background: #f5f5f5; color: #333; }
@@ -47,15 +47,19 @@
                 <label>波特率 (Baud):</label>
                 <div>
                     <select id="serial-baud" onchange="toggleCustomBaud(this.value)">
-                        <option value="115200">115200</option>
+                        <option value="9600">9600</option>
+                        <option value="19200">19200</option>
+                        <option value="38400">38400</option>
+                        <option value="57600">57600</option>
+                        <option value="115200" selected>115200 (預設)</option>
                         <option value="921600">921600</option>
-                        <option value="1000000">1,000,000</option>
-                        <option value="2000000">2,000,000</option>
-                        <option value="4000000" selected>4,000,000 (高速)</option>
-                        <option value="6000000">6,000,000 (超高速)</option>
+                        <option value="1000000">1000000</option>
+                        <option value="2000000">2000000</option>
+                        <option value="4000000">4000000 (高速)</option>
+                        <option value="6000000">6000000</option>
                         <option value="custom">手動輸入...</option>
                     </select>
-                    <input type="number" id="serial-baud-custom" placeholder="自訂速率" style="display:none; width:110px; margin-left:5px;">
+                    <input type="number" id="serial-baud-custom" placeholder="輸入純數字" style="display:none; width:110px; margin-left:5px;">
                 </div>
 
                 <label>資料位 (Data):</label>
@@ -140,10 +144,9 @@
                     }
                 }
             });
-            log("[系統] 網頁快取初始化完畢，歷史紀錄已載入。");
+            log("[系統] 網頁快取初始化完畢。");
         };
 
-        // 控制自訂波特率輸入框的顯示
         function toggleCustomBaud(val) {
             const customInput = document.getElementById('serial-baud-custom');
             if (val === 'custom') {
@@ -154,11 +157,9 @@
             }
         }
 
-        // Web Serial 初始化 (Host端專用) - 注入進階 UART 參數
         async function initSerial() {
-            if (!navigator.serial) return alert("您的瀏覽器不支援 Web Serial API，請使用 Chrome/Edge！");
+            if (!navigator.serial) return alert("您的瀏覽器不支援 Web Serial API！");
             
-            // 抓取畫面上設定的參數
             const baudSelect = document.getElementById('serial-baud').value;
             const baudRate = parseInt(baudSelect === 'custom' ? document.getElementById('serial-baud-custom').value : baudSelect);
             const dataBits = parseInt(document.getElementById('serial-data').value);
@@ -171,7 +172,6 @@
                 log(`[硬體] 正在請求開啟序列埠...`);
                 port = await navigator.serial.requestPort();
                 
-                // 核心：將設定值塞進 Open Options
                 await port.open({ 
                     baudRate: baudRate,
                     dataBits: dataBits,
@@ -183,11 +183,10 @@
                 log(`[硬體] 實體 COM Port 開啟成功！配置為: ${baudRate}, ${parity.toUpperCase().charAt(0)}, ${dataBits}, ${stopBits}`);
                 readSerialLoop();
             } catch (e) { 
-                log("[硬體錯誤] 無法開啟序列埠，錯誤訊息: " + e); 
+                log("[硬體錯誤] 無法開啟序列埠: " + e); 
             }
         }
 
-        // 儲存指令到快取
         function saveCmdToCache(cmd) {
             cmdHistory = cmdHistory.filter(item => item !== cmd);
             cmdHistory.push(cmd);

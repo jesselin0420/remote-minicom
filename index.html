@@ -29,13 +29,18 @@
         #bmp { display: none; }
         #preview { width: 96px; height: 72px; border: 1px solid #c9c9c9; object-fit: contain; background: #eee; }
         .grid-buttons { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 8px; }
-        .color-swatch { inline-block; width: 16px; height: 16px; border: 1px solid #999; margin-left: 6px; vertical-align: middle; border-radius: 2px; }
+        .color-swatch { display: inline-block; width: 16px; height: 16px; border: 1px solid #999; margin-left: 6px; vertical-align: middle; border-radius: 2px; }
         
         /* 歷史紀錄標籤 */
         .history-zone { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; }
         .history-tag { background: #e0e0e0; color: #333; padding: 4px 8px; border-radius: 4px; font-size: 12px; cursor: pointer; font-family: monospace; }
         .history-tag:hover { background: #008080; color: white; }
         .clear-history { background: #d9534f; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-left: auto; }
+        
+        /* Log 控制按鈕樣式 */
+        .log-ctrl-row { display: flex; gap: 10px; margin-top: 8px; }
+        .btn-clear-log { background: #cca43b; }
+        .btn-save-log { background: #2f3640; }
     </style>
 </head>
 <body>
@@ -51,7 +56,7 @@
             <h2>1. 雙方自訂名稱對接</h2>
             <p>請輸入雙方約定的機台代號（全球跨網通用）：</p>
             <div style="margin-bottom: 15px;">
-                <input type="text" id="custom-room" class="input-text" placeholder="例如: jesse_bench_01">
+                <input type="text" id="custom-room" class="input-text" placeholder="例如: jesse_no1">
             </div>
             <button id="btn-host" class="host-btn" onclick="startAsHost()">我是 Host (接硬體端)</button>
             <button id="btn-client" class="client-btn" onclick="startAsClient()">我是 Client (遠端控制)</button>
@@ -158,6 +163,11 @@
         
         <br>
         <textarea id="log" readonly placeholder="通訊日誌..."></textarea>
+        
+        <div class="log-ctrl-row">
+            <button class="btn-clear-log" onclick="clearTerminal()">🗑️ 清除 Terminal 資料</button>
+            <button class="btn-save-log" onclick="saveLogToFile()">💾 儲存所有 Log 到檔案</button>
+        </div>
     </div>
 
     <script>
@@ -210,7 +220,6 @@
                     }
                 }
             });
-            log("INFO", "網頁全功能初始化完畢。");
         };
 
         function toggleCustomBaud(val) {
@@ -479,7 +488,7 @@
 
         async function runHostXmodemWorkflow(rawData) {
             isXmodemSessionActive = true;
-            rxQueue = []; // 先清空一次
+            rxQueue = []; 
             
             try {
                 log("INFO", "開始執行序列面板強制喚醒初始化巨集...");
@@ -491,7 +500,6 @@
                 await sleep(100);
                 await sendHardwareCmdDirect('lcd load');
                 
-                // 【核心修正】等 500ms 讓指令完完全全送完，並把殘留在佇列中的指令回應文字徹底倒掉清空！
                 await sleep(500);
                 rxQueue = []; 
 
@@ -682,6 +690,42 @@
                 renderHistoryTags();
                 log("INFO", "本地指令快取已清空。");
             }
+        }
+
+        // 🛠️ 新增工具函數 1：清除 Terminal 畫面上的文字
+        function clearTerminal() {
+            document.getElementById('log').value = "";
+        }
+
+        // 🛠️ 新增工具函數 2：把現有的 Log 內容包裝成 txt 下載
+        function saveLogToFile() {
+            const logContent = document.getElementById('log').value;
+            if (!logContent) {
+                alert("目前 Terminal 沒有任何資料可以儲存！");
+                return;
+            }
+
+            // 產生年月日時分秒做為檔名一部分
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const date = String(now.getDate()).padStart(2, '0');
+            const hour = String(now.getHours()).padStart(2, '0');
+            const min = String(now.getMinutes()).padStart(2, '0');
+            const sec = String(now.getSeconds()).padStart(2, '0');
+            const fileName = `uart_log_${year}${month}${date}_${hour}${min}${sec}.txt`;
+
+            // 利用 Blob 物件觸發瀏覽器下載
+            const blob = new Blob([logContent], { type: "text/plain;charset=utf-8" });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = fileName;
+            
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            log("INFO", `已成功匯出日誌檔案: ${fileName}`);
         }
 
         function setUploadProgress(pct) {

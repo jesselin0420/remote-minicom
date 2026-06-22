@@ -190,6 +190,52 @@
         const enc = new TextEncoder();
         const dec = new TextDecoder();
 
+        // Strip ANSI escape sequences (color codes, cursor movement, etc.), e.g.
+        // "\x1b[1;34m" or "\x1b[m" which show up as garbage like "[1;34m" in plain text.
+        // Stateful: serial data arrives in arbitrary byte chunks, so an escape sequence
+        // can be split across two reads (e.g. ESC in one chunk, "[1;34m" in the next).
+        // We ONLY buffer when the tail of the chunk is itself an unterminated escape
+        // sequence with nothing else after it -- never buffer real text along with it,
+        // or content gets reordered/mixed with the next chunk.
+        let ansiBuffer = '';
+        function stripAnsi(chunk) {
+            const str = ansiBuffer + chunk;
+            ansiBuffer = '';
+            let result = '';
+            let i = 0;
+
+            while (i < str.length) {
+                if (str[i] === '\x1b') {
+                    const rest = str.slice(i);
+
+                    const csi = rest.match(/^\x1b\[[0-9;]*[a-zA-Z]/);          // e.g. \x1b[1;34m
+                    const osc = rest.match(/^\x1b\][^\x07\x1b]*(\x07|\x1b\\)/); // OSC ... BEL/ST
+                    const match = csi || osc;
+                    if (match) {
+                        i += match[0].length;
+                        continue;
+                    }
+
+                    // Genuinely incomplete sequence: only valid if it runs all the way to
+                    // the end of the chunk with nothing else trailing it (real partial read).
+                    const partial = rest.match(/^\x1b(\[[0-9;]*)?$/) || rest.match(/^\x1b\][^\x07\x1b]*$/);
+                    if (partial) {
+                        ansiBuffer = rest;
+                        break;
+                    }
+
+                    // Lone/garbage ESC not forming any sequence: drop just this one byte.
+                    i += 1;
+                } else {
+                    result += str[i];
+                    i += 1;
+                }
+            }
+
+            // Other stray control chars (keep \t \n \r)
+            return result.replace(/[\x00-\x08\x0e-\x1f]/g, '');
+        }
+
         window.onload = function() {
             const savedHistory = localStorage.getItem('jesse_uart_history');
             if (savedHistory) {
@@ -367,6 +413,7 @@
                 }); 
                 
                 writer = port.writable.getWriter();
+                ansiBuffer = ''; // reset any leftover partial escape sequence from a previous session
                 document.getElementById('btnConnectSerial').style.background = '#0a7a0a';
                 log("INFO", `實體 COM Port 開啟成功！配置: ${baudRate}, ${parity.toUpperCase().charAt(0)}, ${dataBits}, ${stopBits}`);
                 readSerialLoop();
@@ -386,9 +433,11 @@
                             if (isXmodemSessionActive) {
                                 for (const b of value) rxQueue.push(b);
                             } else {
-                                const rawText = dec.decode(value);
-                                log("UART_Rx", rawText.trim());
-                                if (conn && conn.open) conn.send(rawText.trim());
+                                const rawText = stripAnsi(dec.decode(value));
+                                if (rawText.trim()) {
+                                    log("UART_Rx", rawText.trim());
+                                    if (conn && conn.open) conn.send(rawText.trim());
+                                }
                             }
                         }
                     }
@@ -765,7 +814,7 @@
             const consoleLog = document.getElementById('log');
             const d = new Date();
             const timeStr = d.toTimeString().slice(0, 8);
-            consoleLog.value += `[${timeStr}] ${level}: ${msg}\n`;
+            consoleLog.value += `${msg}\n`;
             consoleLog.scrollTop = consoleLog.scrollHeight;
         }
     </script>
